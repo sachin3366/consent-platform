@@ -414,6 +414,179 @@ Notice `422 Unprocessable Entity` appears on every route automatically — FastA
 - **API contract** — the formal agreement between backend and frontend about what requests look like and what responses return; the OpenAPI spec *is* the contract
 
 ### What Comes Next
-Step 6 — Add a `GET /consent/history` endpoint that returns the full audit chain for a user+domain — all records from newest to oldest, each with its decisions.
+Step 6 — Set up git version control and make the first commit.
+
+---
+
+## Step 6 — Git Setup and First Commit
+**Date:** 2026-06-01
+
+### What & Why
+Version control with git does two things:
+1. **Safety net** — you can always revert to any previous working state
+2. **Learning diary** — `git log` and `git diff` show exactly what changed in each step, complementing this `COMMAND_LOG.md`
+
+From this step forward, every logical step ends with a commit.
+
+We also created a `.gitignore` before the first commit — this is critical. Files listed in `.gitignore` are permanently excluded from git. If you accidentally commit a secret (like a database password in `.env`), removing it from git history is painful. Always set up `.gitignore` first.
+
+### What Changed
+
+| File | Change |
+|---|---|
+| `.gitignore` | Created — tells git which files to permanently ignore |
+
+### The .gitignore Rules Explained
+
+```
+venv/          Python virtual environment — thousands of package files, not your code
+               (anyone can recreate it with: pip install -r requirements.txt)
+__pycache__/   Python auto-generates this when it compiles .py files — not source code
+*.pyc          Individual compiled Python files — same reason
+.env           Contains secrets like database passwords — NEVER commit this
+*.db           Local SQLite database — each developer/environment has their own
+.DS_Store      macOS metadata file added to every folder — not part of the project
+node_modules/  Future frontend — same as venv/, anyone can recreate with npm install
+dist/          Future frontend build output — generated files, not source code
+```
+
+### Commands Executed
+
+```bash
+# Initialise an empty git repository in the project root
+git init
+
+# Check what git can see before staging — verify .gitignore is working
+git status
+
+# Stage all files git can see (everything not in .gitignore)
+git add .
+
+# Review exactly what is staged before committing
+git status
+
+# Create the first commit
+git commit -m "feat: initial backend scaffold with consent API"
+```
+
+### What the Staged File List Confirmed
+```
+✓  .gitignore
+✓  COMMAND_LOG.md
+✓  backend/app/__init__.py
+✓  backend/app/database.py
+✓  backend/app/main.py
+✓  backend/app/models.py
+✓  backend/app/routers/__init__.py
+✓  backend/app/routers/consent.py
+✓  backend/app/schemas.py
+✓  backend/requirements.txt
+✓  backend/seed.py
+
+✗  venv/         (hidden by .gitignore — correct)
+✗  .env          (hidden by .gitignore — correct)
+✗  consent.db    (hidden by .gitignore — correct)
+```
+
+### Commit Message Format: feat/fix/chore
+Good commit messages follow a convention — a short prefix says what kind of change it is:
+
+| Prefix | Meaning | Example |
+|---|---|---|
+| `feat:` | New feature or capability | `feat: add POST /consent endpoint` |
+| `fix:` | Bug fix | `fix: prevent duplicate categories on seed` |
+| `chore:` | Maintenance, config, tooling | `chore: add .gitignore` |
+| `docs:` | Documentation only | `docs: update COMMAND_LOG step 3` |
+
+This is called **Conventional Commits** — widely used in professional teams.
+
+### Key Concepts
+- **`git init`** — creates a hidden `.git/` folder in the project root; this folder is the entire repository history
+- **`git status`** — shows which files are untracked, staged, or modified; run this constantly
+- **`git add .`** — stages all unignored files; can also do `git add <specific-file>` for selective staging
+- **`git commit -m "..."`** — creates a permanent snapshot of everything staged
+- **`.gitignore`** — a plain text file listing patterns of files git should never track; processed before `git add`
+- **Staging area** — a holding zone between your working files and the repository; `git add` moves files in, `git commit` saves them permanently
+- **`git log`** — shows all commits; `git log --oneline` gives a compact one-line-per-commit view
+- **`git diff HEAD~1`** — shows exactly what changed between the last commit and the one before it
+
+### What Comes Next
+Step 7 — Push to GitHub via SSH.
+
+---
+
+## Step 7 — Push to GitHub via SSH
+**Date:** 2026-06-01
+
+### What & Why
+Pushing to GitHub gives the project a remote backup and a public URL. From this point, every step ends with `git push` so the remote stays in sync.
+
+We used **SSH** instead of HTTPS because GitHub no longer accepts passwords over HTTPS. SSH authenticates using a key pair — a private key on your machine and a public key registered on GitHub. You generate it once and never need to enter credentials again.
+
+### What Changed
+No code changes — this step was purely git and SSH configuration.
+
+### Commands Executed
+
+```bash
+# Test whether SSH can reach GitHub (before adding to known_hosts this fails)
+ssh -T git@github.com
+
+# GitHub's host key wasn't in known_hosts yet — add it
+ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+# Test again — "Hi sachin3366! You've successfully authenticated" = success
+# (exit code 1 is expected — GitHub confirms auth but denies shell access)
+ssh -T git@github.com
+
+# Switch remote URL from HTTPS to SSH
+git remote set-url origin git@github.com:sachin3366/consent-platform.git
+
+# Push and set upstream tracking (so future `git push` needs no arguments)
+git push -u origin main
+```
+
+### SSH Key Setup (done manually before these commands)
+```bash
+# Generated a new SSH key pair
+ssh-keygen -t ed25519 -C "sachinkhanna3366@gmail.com"
+# Creates two files:
+#   ~/.ssh/id_ed25519      ← private key (never share this)
+#   ~/.ssh/id_ed25519.pub  ← public key (safe to share — added to GitHub)
+
+# Copied public key to clipboard
+cat ~/.ssh/id_ed25519.pub | pbcopy
+# Then pasted into: github.com → Settings → SSH and GPG keys → New SSH key
+```
+
+### HTTPS vs SSH — Why SSH Wins for Development
+
+| | HTTPS | SSH |
+|---|---|---|
+| Authentication | Personal Access Token (expires, must be rotated) | Key pair (set once, works forever) |
+| Credential prompt | Every push unless cached | Never after setup |
+| Security | Token can leak if stored carelessly | Private key stays on your machine |
+| Setup effort | Low | Slightly higher (one-time) |
+
+### Key Concepts
+- **SSH key pair** — two mathematically linked files: private key (stays on your machine) and public key (shared with GitHub). GitHub encrypts a challenge with your public key; your machine decrypts it with the private key. If decryption succeeds, you're authenticated — no password needed.
+- **`known_hosts`** — a file that records the fingerprints of servers you've connected to before. When you connect again, SSH checks the fingerprint matches. `ssh-keyscan` adds a server's fingerprint without requiring an interactive prompt.
+- **`git remote set-url`** — changes the URL of an existing remote without removing and re-adding it
+- **`-u` flag on git push** — sets "upstream tracking", linking your local `main` branch to `origin/main`. After this, plain `git push` (no arguments) knows where to push.
+- **`ed25519`** — a modern elliptic curve algorithm for SSH keys; faster and more secure than the older RSA algorithm
+
+### Repository URL
+**https://github.com/sachin3366/consent-platform**
+
+### Git Workflow Going Forward
+```bash
+git add .                        # stage changes
+git status                       # verify what's staged
+git commit -m "feat: ..."        # commit with clear message
+git push                         # push to GitHub (no arguments needed after -u)
+```
+
+### What Comes Next
+Step 8 — Add `GET /consent/history` endpoint (returns the full audit chain for a user+domain), commit and push.
 
 ---
