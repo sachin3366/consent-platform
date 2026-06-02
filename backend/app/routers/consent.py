@@ -56,6 +56,46 @@ def record_consent(payload: ConsentIn, session: Session = Depends(get_session)):
     )
 
 
+@router.get("/history", response_model=list[ConsentOut])
+def get_consent_history(
+    user_identifier: str, domain: str, session: Session = Depends(get_session)
+):
+    records = session.exec(
+        select(ConsentRecord)
+        .where(ConsentRecord.user_identifier == user_identifier)
+        .where(ConsentRecord.domain == domain)
+        .order_by(ConsentRecord.id.desc())
+    ).all()
+
+    if not records:
+        raise HTTPException(
+            status_code=404,
+            detail="No consent records found for this user and domain.",
+        )
+
+    history = []
+    for record in records:
+        rows = session.exec(
+            select(ConsentDecision, ConsentCategory)
+            .join(ConsentCategory, ConsentDecision.category_id == ConsentCategory.id)
+            .where(ConsentDecision.consent_record_id == record.id)
+        ).all()
+
+        history.append(ConsentOut(
+            id=record.id,
+            user_identifier=record.user_identifier,
+            domain=record.domain,
+            created_at=record.created_at,
+            previous_record_id=record.previous_record_id,
+            decisions=[
+                DecisionOut(category_name=cat.name, accepted=dec.accepted)
+                for dec, cat in rows
+            ],
+        ))
+
+    return history
+
+
 @router.get("/latest", response_model=ConsentOut)
 def get_latest_consent(
     user_identifier: str, domain: str, session: Session = Depends(get_session)
