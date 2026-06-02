@@ -590,3 +590,83 @@ git push                         # push to GitHub (no arguments needed after -u)
 Step 8 — Add `GET /consent/history` endpoint (returns the full audit chain for a user+domain), commit and push.
 
 ---
+
+## Step 8 — Add GET /consent/history Endpoint
+**Date:** 2026-06-01
+
+### What & Why
+`GET /consent/latest` answers "what does this user consent to right now?" — one record.
+`GET /consent/history` answers "show me everything this user has ever consented to" — all records, newest first.
+
+This is the audit trail endpoint. A compliance team, a support agent, or the user themselves could call this to see exactly how consent preferences changed over time and when.
+
+### What Changed
+
+| File | Change |
+|---|---|
+| `backend/app/routers/consent.py` | Added `GET /consent/history` route |
+
+### The Endpoint Logic
+
+```
+1. SELECT all ConsentRecord rows for user+domain, ORDER BY id DESC
+2. If none found → 404
+3. For each record (loop):
+      SELECT ConsentDecision JOIN ConsentCategory WHERE consent_record_id = record.id
+      Build a ConsentOut object with decisions list
+4. Return the list of ConsentOut objects
+```
+
+### Response Shape
+```json
+[
+  {
+    "id": 2, "previous_record_id": 1,
+    "decisions": [{"category_name": "analytics", "accepted": false}]
+  },
+  {
+    "id": 1, "previous_record_id": null,
+    "decisions": [{"category_name": "analytics", "accepted": true}]
+  }
+]
+```
+Reading top to bottom = most recent → oldest. You can see analytics flipped from `true` → `false` between record #1 and #2.
+
+### Commands Executed
+```bash
+# Restart server to pick up code change
+kill $(lsof -ti :8000)
+uvicorn app.main:app --port 8000 &> /tmp/uvicorn.log &
+sleep 3 && curl -s http://localhost:8000/health
+
+# Test — should return 2 records newest first
+curl -s "http://localhost:8000/consent/history?user_identifier=cookie-abc-123&domain=shop.com"
+
+# Test — unknown user, should return 404
+curl -s "http://localhost:8000/consent/history?user_identifier=nobody&domain=shop.com"
+
+# Stage only the changed file (not everything)
+git add backend/app/routers/consent.py
+git status
+git commit -m "feat: add GET /consent/history endpoint"
+git push
+```
+
+### N+1 Query Problem — A Known Trade-off
+This endpoint runs **one SELECT per record** to fetch decisions. If a user had 100 consent records, that's 101 database queries (1 for records + 100 for decisions). This is called the **N+1 problem**.
+
+For `/consent/history` this is acceptable — it's an audit endpoint called rarely, not on every page load. The alternative (a single JOIN query grouped in Python) is more efficient but harder to read.
+
+**Rule of thumb:** Optimise for the hot path (high-frequency endpoints like `/latest`). Accept N+1 on low-frequency endpoints until it becomes a measurable problem.
+
+### Key Concepts
+- **`response_model=list[ConsentOut]`** — tells FastAPI the response is an array of `ConsentOut` objects; no new schema needed
+- **`.all()`** — returns every matching row as a list (vs `.first()` which returns one row or None)
+- **N+1 query problem** — when fetching a list of N items requires N additional queries for related data; a classic ORM pitfall worth knowing but not always worth fixing
+- **Audit trail** — an immutable, append-only log of every change; our `previous_record_id` chain makes this possible
+- **`git add <specific-file>`** — staging a specific file instead of `git add .`; good practice when only one file changed, makes the commit diff cleaner
+
+### What Comes Next
+Step 9 — Start the frontend: scaffold a React app inside the `frontend/` directory.
+
+---
