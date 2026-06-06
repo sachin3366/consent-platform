@@ -1125,6 +1125,256 @@ redis-cli get "latest:cache-test-user:test.com"   # → (empty)
 - **Write-then-invalidate ordering** — always write to the DB first, then delete from cache; the reverse order risks a window of stale cache data if the DB write fails
 
 ### What Comes Next
-Step 14 — to be decided.
+Step 14 — Add API key authentication with per-domain authorization.
+
+---
+
+## Step 14 — API Key Authentication with Per-Domain Authorization
+**Date:** 2026-06-06
+
+### What & Why
+Without auth, any caller on the internet can read or write consent data for any domain. A competitor could read your users' consent records. A bad actor could overwrite them. Auth closes this hole.
+
+For a consent management platform, the right model is **API key per client**: each website registers and gets a key. That key is tied to one domain — so `shop.com`'s key can't read or write `bank.com`'s data even if the attacker knows the key.
+
+### What Changed
+
+| File | Change |
+|---|---|
+| `backend/app/models.py` | Added `APIClient` model — `name`, `api_key`, `domain` |
+| `backend/app/auth.py` | Created — `get_api_client()` FastAPI dependency |
+| `backend/app/routers/consent.py` | Added `Depends(get_api_client)` + domain check to 3 routes |
+| `backend/seed.py` | Seeds a test client: Demo Site → `demo.local` → `demo-api-key-local` |
+| `frontend/src/api.ts` | Added `X-API-Key` header to all protected fetch calls |
+
+### The APIClient Model
+
+```python
+class APIClient(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str                        # human-readable e.g. "Demo Site"
+    api_key: str = Field(index=True) # indexed — every request looks this up
+    domain: str                      # the one domain this key is authorized for
+```
+
+### The auth.py Dependency
+
+```python
+def get_api_client(
+    x_api_key: str = Header(...),       # FastAPI reads the X-API-Key header automatically
+    session: Session = Depends(get_session),
+) -> APIClient:
+    client = session.exec(
+        select(APIClient).where(APIClient.api_key == x_api_key)
+    ).first()
+    if not client:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return client
+```
+
+`Header(...)` means the header is required. If missing, FastAPI rejects the request with `422` before our code runs.
+
+### How Routes Use It
+
+```python
+@router.post("", ...)
+def record_consent(
+    payload: ConsentIn,
+    session: Session = Depends(get_session),
+    client: APIClient = Depends(get_api_client),   # ← injects the validated client
+):
+    if payload.domain != client.domain:
+        raise HTTPException(status_code=403, detail="Domain not authorized for this API key")
+    # rest of handler...
+```
+
+The domain check is the second gate: the key must be valid (401 if not) AND the requested domain must match the key's domain (403 if not).
+
+### What Was Proven
+
+| Scenario | Status code | Meaning |
+|---|---|---|
+| No `X-API-Key` header | `422` | FastAPI rejects — required header missing |
+| Wrong key | `401` | Unauthenticated — "who are you?" |
+| Right key, wrong domain | `403` | Unauthorized — "I know you, but not for this domain" |
+| Right key, right domain | `200` | Passes both checks |
+
+**401 vs 403** is an important distinction: 401 means the caller isn't identified, 403 means they're identified but not allowed. They have different fixes — 401 means "send a valid key", 403 means "you need a different key with the right permissions."
+
+### What's Public vs Protected
+
+| Endpoint | Protected? | Why |
+|---|---|---|
+| `GET /health` | No | Monitoring tools need this without credentials |
+| `GET /consent/categories` | No | Generic reference data, no sensitive information |
+| `POST /consent` | Yes | Writing user data |
+| `GET /consent/latest` | Yes | Reading user data |
+| `GET /consent/history` | Yes | Reading user data |
+
+### Note on API Key Storage
+We store API keys as plain text for this learning project. In production you would hash them (e.g. SHA-256) and store only the hash — so even if the database is compromised, the attacker can't recover the keys. This is the same reason passwords are hashed.
+
+### Key Concepts
+- **API key** — a secret token sent in a request header to identify and authenticate the caller; simpler than OAuth for service-to-service calls
+- **`X-API-Key`** — a conventional header name for API keys; not an HTTP standard but widely used
+- **FastAPI `Header()` dependency** — FastAPI automatically reads a request header and injects it as a function parameter; the parameter name maps to the header name (underscores become hyphens: `x_api_key` → `X-API-Key`)
+- **Dependency injection** — instead of writing the same validation logic in every route, define it once in a dependency (`get_api_client`) and inject it; FastAPI calls it for you
+- **401 Unauthorized** — the request has no valid credentials; the fix is to provide them
+- **403 Forbidden** — credentials are valid but insufficient for this resource; the fix is to use credentials with the right permissions
+- **422 Unprocessable Entity** — the request structure is wrong (missing required field, wrong type); FastAPI emits this automatically before your code runs
+- **Per-domain authorization** — each API key is scoped to one domain; prevents a legitimate key from being used to access another client's data
+
+### What Comes Next
+Step 15 — Async consent writes via Celery + Redis (million architecture step 3).
+
+---
+
+## Step 15 — Async Consent Writes via Celery (Million Architecture Step 3)
+**Date:** 2026-06-06
+
+### What & Why
+`POST /consent` previously blocked until PostgreSQL committed — the HTTP response waited for the DB write to finish. At millions of users submitting consent simultaneously, this adds DB latency to every user interaction.
+
+The fix: accept the request immediately, put the write job on a queue, return `202 Accepted`, and let a separate worker process do the DB write out of band. The user gets a response in microseconds; the DB write happens in the background.
+
+This is "million architecture step 3" — the async write queue.
+
+### Architecture
+
+```
+Browser → POST /consent → Redis queue → 202 back to browser (instant)
+                               ↓
+                       Celery worker (separate OS process)
+                               ↓
+                       Writes to PostgreSQL + invalidates Redis cache
+```
+
+### What Changed
+
+| File | Change |
+|---|---|
+| `backend/app/celery_app.py` | Created — Celery app wired to Redis as broker |
+| `backend/app/tasks.py` | Created — `write_consent_record` task (the DB write logic) |
+| `backend/app/schemas.py` | Added `ConsentQueued` — the 202 response body |
+| `backend/app/routers/consent.py` | `POST /consent` enqueues task, returns 202 — no DB session needed |
+| `backend/requirements.txt` | Added `celery==5.6.3` |
+| `frontend/src/api.ts` | `submitConsent` returns `void` (202 has no record body) |
+| `frontend/src/ConsentBanner.tsx` | 500ms delay after submit before switching to history |
+
+### celery_app.py
+
+```python
+celery_app = Celery(
+    "consent",
+    broker=REDIS_URL,   # Redis receives tasks from the API
+    backend=REDIS_URL,  # Redis stores task results
+    include=["app.tasks"],
+)
+```
+
+Redis plays two roles here: **broker** (the queue — tasks are pushed in, workers pull them out) and **backend** (stores the result/status of completed tasks). We already had Redis running for caching, so no new infrastructure was needed.
+
+### tasks.py — The Write Logic
+
+```python
+@celery_app.task
+def write_consent_record(user_identifier: str, domain: str, decisions: list[dict]):
+    with Session(engine) as session:
+        # Find previous record to link the chain
+        previous = session.exec(...).first()
+
+        record = ConsentRecord(
+            user_identifier=user_identifier,
+            domain=domain,
+            previous_record_id=previous.id if previous else None,
+        )
+        session.add(record)
+        session.flush()
+
+        for d in decisions:
+            category = session.exec(...).first()
+            session.add(ConsentDecision(...))
+
+        session.commit()
+        redis_client.delete(cache_key(user_identifier, domain))  # invalidate cache
+```
+
+This is the same DB write logic that was previously in the route handler — just moved into a task. The task runs in a separate process and opens its own DB session.
+
+### POST /consent — Before vs After
+
+**Before (synchronous — 30 lines):**
+```python
+@router.post("", response_model=ConsentOut, status_code=201)
+def record_consent(payload, session=Depends(get_session), client=Depends(get_api_client)):
+    # ... find previous record
+    # ... create ConsentRecord
+    # ... flush to get ID
+    # ... loop over decisions
+    # ... commit
+    # ... invalidate cache
+    # ... build and return ConsentOut
+```
+
+**After (async — 8 lines):**
+```python
+@router.post("", response_model=ConsentQueued, status_code=202)
+def record_consent(payload, client=Depends(get_api_client)):
+    if payload.domain != client.domain:
+        raise HTTPException(403, ...)
+    write_consent_record.delay(payload.user_identifier, payload.domain, [...])
+    return ConsentQueued(user_identifier=..., domain=...)
+```
+
+The route no longer needs a DB session. It just validates, enqueues, and returns. All business logic moved into the task.
+
+### Commands Executed
+
+```bash
+# Install Celery
+pip install celery
+
+# Start the Celery worker (separate terminal / background process)
+celery -A app.celery_app worker --loglevel=info &> /tmp/celery.log &
+
+# Test: POST returns 202 immediately
+curl -s -X POST http://localhost:8000/consent \
+  -H "X-API-Key: demo-api-key-local" \
+  -d '{"user_identifier":"async-test-user","domain":"demo.local","decisions":[...]}'
+# → {"status":"queued","user_identifier":"async-test-user","domain":"demo.local"}
+
+sleep 1  # let the worker write
+
+# GET latest — record written by the worker
+curl -s "http://localhost:8000/consent/latest?..." -H "X-API-Key: demo-api-key-local"
+# → full ConsentOut record
+
+# Worker log confirmed:
+# Task app.tasks.write_consent_record received
+# Task succeeded in 0.047s
+```
+
+### The Eventual Consistency Trade-off
+
+Async writes introduce **eventual consistency**: the data is not in the DB the instant the 202 is returned. There is a window (milliseconds locally, potentially longer under load) where a `GET /consent/latest` would return the old state.
+
+We handle this in the frontend with a 500ms delay after submit before loading history. In production you'd use one of:
+- **Polling** — the frontend keeps calling GET until it sees the new record
+- **WebSockets** — the worker notifies the browser when the write is done
+- **Accepting the lag** — show the previous state, update on next page load
+
+The 500ms is a demo shortcut, not a production solution.
+
+### Key Concepts
+- **Celery** — Python's standard distributed task queue; a task is just a decorated function; `.delay()` sends it to the queue
+- **Broker** — the message transport between the API (producer) and the worker (consumer); we use Redis
+- **Worker** — a separate OS process that listens for tasks on the queue and executes them; started with `celery -A <app> worker`
+- **202 Accepted** — HTTP status meaning "I received your request and will process it, but it's not done yet"; distinct from 200 (done synchronously) and 201 (resource created synchronously)
+- **Eventual consistency** — the system will reach the correct state, but not necessarily immediately; the trade-off for higher throughput
+- **Thin route handler** — after this change, `POST /consent` does no DB work at all; validation and enqueue only; the heavy work is in the task; this is the goal of async architecture
+- **`.delay()`** — Celery's shorthand for `.apply_async()`; sends the task to the broker queue immediately and returns a task ID (which we ignore here)
+
+### What Comes Next
+Step 16 — to be decided.
 
 ---
