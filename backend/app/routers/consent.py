@@ -3,9 +3,14 @@ from sqlmodel import Session, select
 
 from app.database import get_session
 from app.models import ConsentCategory, ConsentDecision, ConsentRecord
-from app.schemas import ConsentIn, ConsentOut, DecisionOut
+from app.schemas import CategoryOut, ConsentIn, ConsentOut, DecisionOut
 
 router = APIRouter(prefix="/consent", tags=["consent"])
+
+
+@router.get("/categories", response_model=list[CategoryOut])
+def list_categories(session: Session = Depends(get_session)):
+    return session.exec(select(ConsentCategory)).all()
 
 
 @router.post("", response_model=ConsentOut, status_code=201)

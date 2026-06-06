@@ -670,3 +670,147 @@ For `/consent/history` this is acceptable — it's an audit endpoint called rare
 Step 9 — Start the frontend: scaffold a React app inside the `frontend/` directory.
 
 ---
+
+## Step 9 — Frontend Scaffold + Consent UI
+**Date:** 2026-06-02
+
+### What & Why
+With the backend API working, we can now build a UI that talks to it. The goal of this step is:
+
+1. **Add a missing backend endpoint** — `GET /consent/categories` so the frontend can ask "what categories exist?" without hardcoding them.
+2. **Scaffold a React + TypeScript app** using **Vite** — a modern build tool that is much faster than Create React App.
+3. **Build two views**: a **Consent Banner** (toggles + submit) and a **Consent History** (event chain table).
+
+Without the categories endpoint the frontend would need to hardcode `["analytics", "marketing", …]` — which would go stale every time the backend DB changed. Fetching from the API keeps them in sync automatically.
+
+### Files Changed / Created
+
+| File | What it does |
+|---|---|
+| `backend/app/schemas.py` | Added `CategoryOut` — the Pydantic shape for a single category response |
+| `backend/app/routers/consent.py` | Added `GET /consent/categories` — returns all rows from `ConsentCategory` |
+| `frontend/src/api.ts` | All `fetch()` calls in one place — `fetchCategories`, `submitConsent`, `fetchHistory` |
+| `frontend/src/ConsentBanner.tsx` | Toggle-switch UI; loads categories from API, submits decisions to `POST /consent` |
+| `frontend/src/ConsentHistory.tsx` | Table of all consent records in reverse order, showing the event chain |
+| `frontend/src/App.tsx` | Top-level shell with a nav bar switching between Banner and History views |
+| `frontend/src/App.css` | Replaced Vite default styles with a minimal reset |
+
+### Commands Run
+
+```bash
+# From backend/app/routers/consent.py — added this new endpoint:
+# GET /consent/categories → returns list[CategoryOut]
+
+# Scaffold the Vite React TypeScript app into the (empty) frontend/ directory
+cd /Users/sachinkhanna/Projects/consent-platform/frontend
+npm create vite@latest . -- --template react-ts
+# "." means "scaffold into the current directory, don't create a subdirectory"
+# "--template react-ts" picks React + TypeScript (vs plain JS or Vue etc.)
+
+npm install
+# Downloads all dependencies listed in the generated package.json into node_modules/
+
+npx tsc --noEmit
+# Runs the TypeScript compiler WITHOUT writing any output files
+# Pure type-checking — if it exits silently, there are no type errors
+```
+
+### Key Concepts
+
+- **Vite** — a frontend build tool that uses ES modules natively in the browser during development, making hot-reload nearly instant. Much faster than webpack-based tools like Create React App.
+- **`--template react-ts`** — Vite supports multiple templates (vanilla, vue, react, react-ts, etc.). `react-ts` gives you React pre-wired with TypeScript config.
+- **TypeScript interface** — in `api.ts` we define `Category`, `Decision`, `ConsentRecord` as interfaces. These are compile-time shapes only — they vanish at runtime. They let the editor catch mismatches (e.g. using `record.userId` instead of `record.user_identifier`) before you even refresh the browser.
+- **`useEffect`** — a React hook that runs side effects (like `fetch()` calls) after the component renders. The dependency array `[userId, domain, refreshKey]` controls *when* it re-runs: only when one of those values changes.
+- **Lifting state / refreshKey pattern** — `App.tsx` owns a `refreshKey` counter. After a successful banner submission, it increments the counter and passes it down to `ConsentHistory`. The history component lists `refreshKey` in its `useEffect` deps, so it automatically re-fetches. This is the React-idiomatic way to trigger a child re-fetch from a parent without direct imperative calls.
+- **`encodeURIComponent`** — in `fetchHistory`, the query-string params are wrapped with this. It converts characters like spaces or `@` into their URL-safe equivalents (`%20`, `%40`) so the URL stays valid.
+- **CORS** — the backend already has `CORSMiddleware` with `allow_origins=["*"]`. Without it, the browser would block the frontend (running on port 5173) from calling the backend (port 8000) because they are different "origins".
+
+### What Comes Next
+Step 10 — Run both servers locally, seed the DB with categories, and test the full flow end-to-end in the browser.
+
+---
+
+## Step 10 — End-to-End Test: Both Servers Running
+**Date:** 2026-06-06
+
+### What & Why
+Before moving on to new features, we always verify the current state works end-to-end in a real browser. This catches seam bugs — problems that only appear when the frontend and backend are actually talking to each other — that unit tests and API tests alone can't detect.
+
+We used **Playwright** (a headless browser automation tool) to drive the app programmatically, capturing screenshots at each step as evidence.
+
+### What Changed
+No code changes — this step was pure verification.
+
+### Servers Running
+| Server | Command | URL |
+|---|---|---|
+| Backend (FastAPI) | `uvicorn app.main:app --port 8000` | http://localhost:8000 |
+| Frontend (Vite) | `npm run dev -- --port 5173` | http://localhost:5173 |
+
+### Commands Executed
+
+```bash
+# Kill any stale process on port 8000 from a previous session
+kill $(lsof -ti :8000)
+
+# Restart backend with updated code (picks up GET /consent/categories)
+cd backend && source venv/bin/activate
+uvicorn app.main:app --port 8000 &> /tmp/uvicorn.log &
+sleep 3 && curl -s http://localhost:8000/health
+
+# Confirm categories endpoint works
+curl -s http://localhost:8000/consent/categories | python3 -m json.tool
+
+# Confirm SQLite DB is still seeded
+sqlite3 backend/consent.db "SELECT * FROM consentcategory;"
+
+# Start the Vite frontend dev server
+cd frontend && npm run dev -- --port 5173 &> /tmp/vite.log &
+sleep 4 && cat /tmp/vite.log
+
+# Install Playwright + Chromium headless (one-time)
+cd /tmp && npm install playwright
+npx playwright install chromium
+
+# Run a Playwright script to drive the full flow
+node /tmp/verify_consent.mjs
+```
+
+### Full Flow Tested
+
+**Step 1 — Page load:** The banner rendered with all 4 toggle switches (strictly_necessary, functional, analytics, marketing) all off by default. Descriptions came from the backend (not hardcoded). No console errors.
+
+**Step 2 — Toggle + submit:** Toggled analytics and marketing on, clicked "Save preferences". POST `/consent` succeeded. App automatically switched to History view.
+
+**Step 3 — History after first submission:** Record #3 shown as "origin" (first record for this user+domain pair). Correct decisions: analytics ✓, marketing ✓.
+
+**Step 4 — Second submission:** Navigated back to Banner. Toggled strictly_necessary on. Saved again.
+
+**Step 5 — History after second submission:** Two records visible, newest first:
+```
+Record #4  ← links to #3   [latest]
+  strictly_necessary: ✓   functional: ✗   analytics: ✗   marketing: ✗
+
+Record #3  origin
+  strictly_necessary: ✗   functional: ✗   analytics: ✓   marketing: ✓
+```
+The immutable event chain is intact. Reading top-to-bottom shows exactly how preferences changed between the two submissions.
+
+### Result
+All flows passed. No console errors. The full stack — SQLite → FastAPI → React — is working end-to-end.
+
+### One Known Gap (not a bug)
+The banner always resets toggles to all-off on every load. It does not pre-populate from the user's last known state. The backend endpoint `GET /consent/latest` already exists and could power this. This is the next natural improvement.
+
+### Key Concepts
+- **End-to-end test** — drives the real app through its actual UI, covering the seams between frontend and backend; different from unit tests (which test one function in isolation) and API tests (which bypass the UI)
+- **Playwright** — a Node.js library for controlling a real browser (Chrome, Firefox, Safari) programmatically; can take screenshots, click buttons, read the DOM, and check the console for errors
+- **Headless browser** — a browser that runs without a visible window; identical to a real browser under the hood (same rendering engine, same JS engine), just no GUI
+- **`networkidle`** — Playwright waits until there are no in-flight network requests before considering the page "settled"; ensures fetch() calls have completed before asserting on the result
+- **Seam** — the boundary between two systems (here: frontend ↔ backend); bugs at seams are common because each side may work in isolation but break when integrated
+- **Evidence-based verification** — screenshots and captured output, not just "it looked right"; the Playwright script produces `/tmp/step1_banner.png` and `/tmp/step5_history2.png` as proof
+
+### What Comes Next
+Step 11 — Pre-populate the consent banner from `GET /consent/latest` so returning users see their last saved preferences instead of all-off defaults.
+
+---

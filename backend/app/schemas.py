@@ -14,6 +14,12 @@ class ConsentIn(BaseModel):
     decisions: list[DecisionIn]
 
 
+class CategoryOut(BaseModel):
+    id: int
+    name: str
+    description: str
+
+
 class DecisionOut(BaseModel):
     category_name: str
     accepted: bool
