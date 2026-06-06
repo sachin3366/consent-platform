@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchCategories, submitConsent, type Category, type Decision } from "./api";
+import { fetchCategories, fetchLatest, submitConsent, type Category, type Decision } from "./api";
 
 interface Props {
   userId: string;
@@ -15,17 +15,19 @@ export default function ConsentBanner({ userId, domain, onSubmitted }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchCategories()
-      .then((cats) => {
+    Promise.all([fetchCategories(), fetchLatest(userId, domain)])
+      .then(([cats, latest]) => {
         setCategories(cats);
-        // default all to false
         const defaults: Record<string, boolean> = {};
         cats.forEach((c) => (defaults[c.name] = false));
+        if (latest) {
+          latest.decisions.forEach((d) => (defaults[d.category_name] = d.accepted));
+        }
         setDecisions(defaults);
       })
       .catch(() => setError("Could not load categories. Is the backend running?"))
       .finally(() => setLoading(false));
-  }, []);
+  }, [userId, domain]);
 
   function toggle(name: string) {
     setDecisions((prev) => ({ ...prev, [name]: !prev[name] }));

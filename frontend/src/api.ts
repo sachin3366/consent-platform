@@ -40,6 +40,18 @@ export async function submitConsent(
   return res.json();
 }
 
+export async function fetchLatest(
+  user_identifier: string,
+  domain: string
+): Promise<ConsentRecord | null> {
+  const res = await fetch(
+    `${BASE_URL}/consent/latest?user_identifier=${encodeURIComponent(user_identifier)}&domain=${encodeURIComponent(domain)}`
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error("Failed to load latest consent");
+  return res.json();
+}
+
 export async function fetchHistory(
   user_identifier: string,
   domain: string
