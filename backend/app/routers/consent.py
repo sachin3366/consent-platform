@@ -1,6 +1,9 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
+from app.cache import CACHE_TTL, cache_key, redis_client
 from app.database import get_session
 from app.models import ConsentCategory, ConsentDecision, ConsentRecord
 from app.schemas import CategoryOut, ConsentIn, ConsentOut, DecisionOut
@@ -50,6 +53,9 @@ def record_consent(payload: ConsentIn, session: Session = Depends(get_session)):
 
     session.commit()
     session.refresh(record)
+
+    # New record means cached latest is stale — delete it so next read rebuilds
+    redis_client.delete(cache_key(payload.user_identifier, payload.domain))
 
     return ConsentOut(
         id=record.id,
@@ -105,6 +111,14 @@ def get_consent_history(
 def get_latest_consent(
     user_identifier: str, domain: str, session: Session = Depends(get_session)
 ):
+    key = cache_key(user_identifier, domain)
+
+    # Cache hit — return immediately without touching PostgreSQL
+    cached = redis_client.get(key)
+    if cached:
+        return json.loads(cached)
+
+    # Cache miss — query PostgreSQL
     record = session.exec(
         select(ConsentRecord)
         .where(ConsentRecord.user_identifier == user_identifier)
@@ -118,23 +132,25 @@ def get_latest_consent(
             detail="No consent record found for this user and domain.",
         )
 
-    # Fetch decisions joined with category names
     rows = session.exec(
         select(ConsentDecision, ConsentCategory)
         .join(ConsentCategory, ConsentDecision.category_id == ConsentCategory.id)
         .where(ConsentDecision.consent_record_id == record.id)
     ).all()
 
-    decisions_out = [
-        DecisionOut(category_name=cat.name, accepted=dec.accepted)
-        for dec, cat in rows
-    ]
-
-    return ConsentOut(
+    result = ConsentOut(
         id=record.id,
         user_identifier=record.user_identifier,
         domain=record.domain,
         created_at=record.created_at,
         previous_record_id=record.previous_record_id,
-        decisions=decisions_out,
+        decisions=[
+            DecisionOut(category_name=cat.name, accepted=dec.accepted)
+            for dec, cat in rows
+        ],
     )
+
+    # Store in Redis — expires automatically after CACHE_TTL seconds
+    redis_client.setex(key, CACHE_TTL, result.model_dump_json())
+
+    return result
