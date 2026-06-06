@@ -1,9 +1,10 @@
 """
-Run once to populate the database with the standard consent categories.
+Run once to populate the database with the standard consent categories and test API clients.
 Usage: python seed.py  (from inside the backend/ directory with venv active)
 """
+from sqlmodel import select
 from app.database import get_session
-from app.models import ConsentCategory
+from app.models import APIClient, ConsentCategory
 
 DEFAULT_CATEGORIES = [
     ConsentCategory(
@@ -24,17 +25,32 @@ DEFAULT_CATEGORIES = [
     ),
 ]
 
+TEST_CLIENTS = [
+    APIClient(name="Demo Site", api_key="demo-api-key-local", domain="demo.local"),
+]
+
 if __name__ == "__main__":
     session = next(get_session())
+
+    print("Seeding categories...")
     for category in DEFAULT_CATEGORIES:
         if not session.exec(
-            __import__("sqlmodel").select(ConsentCategory).where(
-                ConsentCategory.name == category.name
-            )
+            select(ConsentCategory).where(ConsentCategory.name == category.name)
         ).first():
             session.add(category)
             print(f"  Added: {category.name}")
         else:
             print(f"  Skipped (already exists): {category.name}")
+
+    print("Seeding API clients...")
+    for client in TEST_CLIENTS:
+        if not session.exec(
+            select(APIClient).where(APIClient.api_key == client.api_key)
+        ).first():
+            session.add(client)
+            print(f"  Added client: {client.name} → domain={client.domain} key={client.api_key}")
+        else:
+            print(f"  Skipped (already exists): {client.name}")
+
     session.commit()
     print("Done.")

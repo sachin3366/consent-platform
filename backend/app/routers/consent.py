@@ -3,9 +3,10 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
+from app.auth import get_api_client
 from app.cache import CACHE_TTL, cache_key, redis_client
 from app.database import get_session
-from app.models import ConsentCategory, ConsentDecision, ConsentRecord
+from app.models import APIClient, ConsentCategory, ConsentDecision, ConsentRecord
 from app.schemas import CategoryOut, ConsentIn, ConsentOut, DecisionOut
 
 router = APIRouter(prefix="/consent", tags=["consent"])
@@ -17,7 +18,13 @@ def list_categories(session: Session = Depends(get_session)):
 
 
 @router.post("", response_model=ConsentOut, status_code=201)
-def record_consent(payload: ConsentIn, session: Session = Depends(get_session)):
+def record_consent(
+    payload: ConsentIn,
+    session: Session = Depends(get_session),
+    client: APIClient = Depends(get_api_client),
+):
+    if payload.domain != client.domain:
+        raise HTTPException(status_code=403, detail="Domain not authorized for this API key")
     # Find the most recent record for this user+domain to link the chain
     previous = session.exec(
         select(ConsentRecord)
@@ -69,8 +76,13 @@ def record_consent(payload: ConsentIn, session: Session = Depends(get_session)):
 
 @router.get("/history", response_model=list[ConsentOut])
 def get_consent_history(
-    user_identifier: str, domain: str, session: Session = Depends(get_session)
+    user_identifier: str,
+    domain: str,
+    session: Session = Depends(get_session),
+    client: APIClient = Depends(get_api_client),
 ):
+    if domain != client.domain:
+        raise HTTPException(status_code=403, detail="Domain not authorized for this API key")
     records = session.exec(
         select(ConsentRecord)
         .where(ConsentRecord.user_identifier == user_identifier)
@@ -109,8 +121,14 @@ def get_consent_history(
 
 @router.get("/latest", response_model=ConsentOut)
 def get_latest_consent(
-    user_identifier: str, domain: str, session: Session = Depends(get_session)
+    user_identifier: str,
+    domain: str,
+    session: Session = Depends(get_session),
+    client: APIClient = Depends(get_api_client),
 ):
+    if domain != client.domain:
+        raise HTTPException(status_code=403, detail="Domain not authorized for this API key")
+
     key = cache_key(user_identifier, domain)
 
     # Cache hit — return immediately without touching PostgreSQL

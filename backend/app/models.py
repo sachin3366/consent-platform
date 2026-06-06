@@ -27,3 +27,11 @@ class ConsentDecision(SQLModel, table=True):
     consent_record_id: int = Field(foreign_key="consentrecord.id")
     category_id: int = Field(foreign_key="consentcategory.id")
     accepted: bool
+
+
+class APIClient(SQLModel, table=True):
+    """A registered website/customer that is authorized to use this API."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str                                  # human-readable e.g. "Demo Site"
+    api_key: str = Field(index=True)           # indexed — every request looks this up
+    domain: str                                # the one domain this key is authorized for
