@@ -27,7 +27,6 @@ DEFAULT_CATEGORIES = [
 if __name__ == "__main__":
     session = next(get_session())
     for category in DEFAULT_CATEGORIES:
-        existing = session.get(ConsentCategory, category.name)
         if not session.exec(
             __import__("sqlmodel").select(ConsentCategory).where(
                 ConsentCategory.name == category.name
