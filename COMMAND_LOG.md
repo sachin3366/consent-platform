@@ -999,3 +999,132 @@ postgresql://sachinkhanna@localhost/consent_platform
 Step 13 — Add Redis caching for `GET /consent/latest` (million architecture step 2).
 
 ---
+
+## Step 13 — Redis Cache for GET /consent/latest (Million Architecture Step 2)
+**Date:** 2026-06-06
+
+### What & Why
+`GET /consent/latest` fires on every page load — it's the hottest endpoint in the system. At millions of users, this means millions of identical PostgreSQL queries returning the same row over and over. The answer only changes when the user submits new consent via `POST /consent`.
+
+Redis is an in-memory key/value store. We cache the result of `GET /consent/latest` in Redis so subsequent calls return instantly without touching PostgreSQL at all.
+
+### The Strategy: Cache-Aside with Write Invalidation
+
+```
+GET /consent/latest?user=X&domain=Y
+  → check Redis for key "latest:X:Y"
+  → HIT  → return cached JSON instantly  (no DB query)
+  → MISS → query PostgreSQL
+           → store result in Redis with 5-min TTL
+           → return result
+
+POST /consent (new submission for user=X, domain=Y)
+  → write new record to PostgreSQL
+  → DELETE "latest:X:Y" from Redis   ← cache is now stale, remove it
+  → next GET will be a MISS → rebuilds cache from fresh DB row
+```
+
+This pattern is called **cache-aside** (also called lazy loading): the cache is only populated on a miss, not proactively. The write path **invalidates** (deletes) the key rather than updating it — simpler and avoids the race condition where two writers both try to update the cache simultaneously.
+
+### What Changed
+
+| File | Change |
+|---|---|
+| `backend/app/cache.py` | Created — Redis client, `cache_key()` helper, `CACHE_TTL` constant |
+| `backend/app/routers/consent.py` | `GET /consent/latest`: check cache first, store on miss. `POST /consent`: delete cache key after commit |
+| `backend/requirements.txt` | Added `redis==8.0.0` |
+
+### cache.py — The Full File
+
+```python
+import redis, os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+CACHE_TTL = 300  # seconds — cache auto-expires after 5 min even without invalidation
+
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
+def cache_key(user_identifier: str, domain: str) -> str:
+    return f"latest:{user_identifier}:{domain}"
+```
+
+**Why `decode_responses=True`?** By default, Redis returns raw bytes. This flag tells the client to automatically decode them to Python strings, so we don't have to call `.decode()` everywhere.
+
+**Why a `CACHE_TTL`?** Invalidation on write is the primary mechanism, but a TTL is a safety net. If invalidation ever failed (e.g. Redis was momentarily unreachable during a write), the cache would eventually expire on its own rather than serving stale data forever.
+
+### GET /consent/latest — Cache Logic
+
+```python
+key = cache_key(user_identifier, domain)
+
+cached = redis_client.get(key)
+if cached:
+    return json.loads(cached)   # HIT: deserialise and return — no DB touched
+
+# MISS: query PostgreSQL as normal...
+result = ConsentOut(...)
+
+redis_client.setex(key, CACHE_TTL, result.model_dump_json())
+# setex = SET with EXpiry: stores the JSON string and sets the TTL atomically
+
+return result
+```
+
+### POST /consent — Invalidation
+
+```python
+session.commit()   # write to PostgreSQL first — always make the DB the source of truth
+redis_client.delete(cache_key(payload.user_identifier, payload.domain))
+# now the next GET will be a MISS and rebuild from the fresh row
+```
+
+**Why delete after commit, not before?** If we deleted before committing and the commit failed, the cache would be empty but the DB would still have the old data — a window where GETs return stale results until the TTL expires. Deleting after a successful commit is always safe.
+
+### Commands Executed
+
+```bash
+# Install Redis via Homebrew
+brew install redis
+brew services start redis
+redis-cli ping   # → PONG
+
+# Install the Python Redis client
+pip install redis
+
+# Verify cache miss: first GET hits PostgreSQL, stores in Redis
+curl -s "http://localhost:8000/consent/latest?user_identifier=cache-test-user&domain=test.com"
+redis-cli get "latest:cache-test-user:test.com"   # → JSON blob stored
+
+# Verify cache hit: second GET emits no SQL (confirmed via server log)
+curl -s "http://localhost:8000/consent/latest?..." > /dev/null
+tail -5 /tmp/uvicorn.log   # → only the HTTP 200 line, no SELECT statements
+
+# Verify invalidation: POST /consent deletes the key
+curl -s -X POST http://localhost:8000/consent -d '{...}' > /dev/null
+redis-cli get "latest:cache-test-user:test.com"   # → (empty)
+```
+
+### What Was Proven
+
+| Test | Result |
+|---|---|
+| Cache miss → PostgreSQL queried, key stored in Redis | ✓ |
+| Cache hit → second GET returned 200 with zero SQL emitted | ✓ |
+| POST /consent → Redis key deleted, next GET rebuilds from fresh row | ✓ |
+
+### Key Concepts
+- **Redis** — an in-memory key/value store; reads are sub-millisecond because data lives in RAM, not on disk
+- **Cache-aside (lazy loading)** — populate the cache only on a miss; the application code manages it explicitly; contrast with write-through (cache is always updated on write)
+- **Cache invalidation** — deleting a stale cache entry so the next read gets fresh data; one of the genuinely hard problems in distributed systems
+- **TTL (Time To Live)** — an expiry time set on a cache key; after TTL seconds, Redis deletes the key automatically; acts as a backstop if invalidation fails
+- **`setex`** — Redis command: SET + EXpiry in one atomic operation; ensures the TTL is always set when the value is written
+- **`decode_responses=True`** — tells the Python Redis client to return strings instead of raw bytes; avoids manual `.decode()` calls everywhere
+- **Write-then-invalidate ordering** — always write to the DB first, then delete from cache; the reverse order risks a window of stale cache data if the DB write fails
+
+### What Comes Next
+Step 14 — to be decided.
+
+---
