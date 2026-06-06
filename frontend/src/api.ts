@@ -1,6 +1,5 @@
 const BASE_URL = "http://localhost:8000";
-// In production this would come from an environment variable, never hardcoded
-const API_KEY = "demo-api-key-local";
+const API_KEY = import.meta.env.VITE_API_KEY as string;
 
 export interface Category {
   id: number;
