@@ -890,6 +890,112 @@ Playwright confirmed: on load, the banner showed `strictly_necessary` toggled ON
 - **`useEffect` dependency array** — listing `[userId, domain]` instead of `[]` means "re-run this effect whenever userId or domain changes." With `[]` the effect only runs once on mount, which would show stale data if the user identity ever changed.
 
 ### What Comes Next
-Step 12 — to be decided.
+Step 12 — Swap SQLite for PostgreSQL (million architecture step 1).
+
+---
+
+## Step 12 — SQLite → PostgreSQL (Million Architecture Step 1)
+**Date:** 2026-06-06
+
+### What & Why
+SQLite is a single-writer, file-based database. It's fine for learning and local development, but at any meaningful concurrent load it becomes the bottleneck — only one write can happen at a time. PostgreSQL is a full client-server database with concurrent writes, connection pooling, proper type enforcement, and read replica support.
+
+This is "million architecture step 1" — the first thing that would actually break at scale is the database, so we swap it first.
+
+### What Changed
+
+| File | Change |
+|---|---|
+| `backend/requirements.txt` | Added `psycopg2-binary` — the Python driver SQLAlchemy needs to talk to PostgreSQL |
+| `backend/app/database.py` | Removed `connect_args={"check_same_thread": False}` (SQLite-only flag) |
+| `backend/.env` | `sqlite:///./consent.db` → `postgresql://sachinkhanna@localhost/consent_platform` |
+| `backend/seed.py` | Removed dead line that passed `name` (string) as the integer primary key |
+
+### Commands Executed
+
+```bash
+# Install PostgreSQL 16 via Homebrew
+brew install postgresql@16
+
+# Start the PostgreSQL background service (persists across reboots)
+brew services start postgresql@16
+
+# Create the database (Homebrew installs as current OS user with no password)
+createdb consent_platform
+
+# Confirm connection
+psql consent_platform -c "\conninfo"
+
+# Install the Python PostgreSQL driver inside the venv
+cd backend && source venv/bin/activate
+pip install psycopg2-binary
+
+# Restart server — SQLModel auto-creates tables in PostgreSQL on startup
+kill $(lsof -ti :8000)
+uvicorn app.main:app --port 8000 &> /tmp/uvicorn.log &
+
+# Re-seed categories into the fresh PostgreSQL database
+python seed.py
+
+# Confirm directly in PostgreSQL (bypasses the API — pure DB check)
+psql consent_platform -c "SELECT * FROM consentcategory;"
+```
+
+### What the Server Log Showed on Startup
+SQLModel translated our Python models into PostgreSQL-flavoured SQL. Notice the key difference from SQLite:
+
+```sql
+-- SQLite used:   id INTEGER NOT NULL
+-- PostgreSQL uses: id SERIAL NOT NULL   ← SERIAL = auto-incrementing integer sequence
+CREATE TABLE consentcategory (
+    id SERIAL NOT NULL,
+    name VARCHAR NOT NULL,
+    description VARCHAR NOT NULL,
+    PRIMARY KEY (id)
+)
+```
+
+`SERIAL` is PostgreSQL's built-in auto-increment type. SQLModel/SQLAlchemy mapped our `Optional[int] = Field(default=None, primary_key=True)` to the right type for each database automatically.
+
+### Bug Found: seed.py Passed Wrong Type as Primary Key
+
+```python
+# This line in seed.py was a latent bug:
+existing = session.get(ConsentCategory, category.name)
+#                                       ^^^^^^^^^^^^^^
+#  session.get(Model, primary_key) — but id is an int, not a string
+#  SQLite silently accepted it. PostgreSQL threw:
+#  "invalid input syntax for type integer: 'strictly_necessary'"
+```
+
+The line was also dead code — its result was never used. The actual duplicate check below it (using `select().where(name == ...)`) was correct. We deleted the bad line.
+
+**Lesson:** PostgreSQL's strict type enforcement acts as a second linter. Bugs that hide in SQLite's permissive type system get caught immediately in PostgreSQL. This is one of the real reasons teams use PostgreSQL even in development.
+
+### The ORM Advantage — Nothing Else Changed
+Models, schemas, routes, frontend — zero changes. SQLModel/SQLAlchemy translated the same Python classes into the right SQL dialect for each database. This is the core promise of an ORM: swap the database by changing one connection string.
+
+### Connection String Format
+```
+postgresql://[user]:[password]@[host]/[database]
+sqlite:///./consent.db         ← relative file path, no user/host needed
+
+postgresql://sachinkhanna@localhost/consent_platform
+             ^^^^^^^^^^^^ ^^^^^^^^^  ^^^^^^^^^^^^^^^
+             OS username  host       database name
+             (no password — Homebrew installs trust auth locally)
+```
+
+### Key Concepts
+- **PostgreSQL** — a full client-server relational database; supports concurrent reads and writes, connection pooling, read replicas, JSON columns, and strict type enforcement
+- **`psycopg2-binary`** — the Python database driver (also called an "adapter") that lets SQLAlchemy send SQL to PostgreSQL over a socket; `binary` means it comes pre-compiled, no C compiler needed
+- **`SERIAL`** — PostgreSQL's auto-increment integer type; equivalent to SQLite's `INTEGER PRIMARY KEY AUTOINCREMENT`
+- **`brew services start`** — runs PostgreSQL as a macOS background service that survives reboots; alternative to manually starting it each time
+- **Connection string** — a URL that encodes everything needed to connect to a database: driver, user, password, host, port, database name
+- **Trust auth** — Homebrew's default local PostgreSQL config: connections from the same OS user need no password; fine for development, never for production
+- **Type strictness** — PostgreSQL enforces column types at the database level; SQLite stores everything as text internally and coerces freely; PostgreSQL rejects mismatches with a clear error
+
+### What Comes Next
+Step 13 — Add Redis caching for `GET /consent/latest` (million architecture step 2).
 
 ---
