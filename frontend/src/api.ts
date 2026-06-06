@@ -34,14 +34,13 @@ export async function submitConsent(
   user_identifier: string,
   domain: string,
   decisions: Decision[]
-): Promise<ConsentRecord> {
+): Promise<void> {
   const res = await fetch(`${BASE_URL}/consent`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...AUTH_HEADER },
     body: JSON.stringify({ user_identifier, domain, decisions }),
   });
   if (!res.ok) throw new Error("Failed to submit consent");
-  return res.json();
 }
 
 export async function fetchLatest(

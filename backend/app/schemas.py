@@ -32,3 +32,9 @@ class ConsentOut(BaseModel):
     created_at: datetime
     previous_record_id: Optional[int]
     decisions: list[DecisionOut]
+
+
+class ConsentQueued(BaseModel):
+    status: str = "queued"
+    user_identifier: str
+    domain: str

@@ -7,7 +7,8 @@ from app.auth import get_api_client
 from app.cache import CACHE_TTL, cache_key, redis_client
 from app.database import get_session
 from app.models import APIClient, ConsentCategory, ConsentDecision, ConsentRecord
-from app.schemas import CategoryOut, ConsentIn, ConsentOut, DecisionOut
+from app.schemas import CategoryOut, ConsentIn, ConsentOut, ConsentQueued, DecisionOut
+from app.tasks import write_consent_record
 
 router = APIRouter(prefix="/consent", tags=["consent"])
 
@@ -17,61 +18,20 @@ def list_categories(session: Session = Depends(get_session)):
     return session.exec(select(ConsentCategory)).all()
 
 
-@router.post("", response_model=ConsentOut, status_code=201)
+@router.post("", response_model=ConsentQueued, status_code=202)
 def record_consent(
     payload: ConsentIn,
-    session: Session = Depends(get_session),
     client: APIClient = Depends(get_api_client),
 ):
     if payload.domain != client.domain:
         raise HTTPException(status_code=403, detail="Domain not authorized for this API key")
-    # Find the most recent record for this user+domain to link the chain
-    previous = session.exec(
-        select(ConsentRecord)
-        .where(ConsentRecord.user_identifier == payload.user_identifier)
-        .where(ConsentRecord.domain == payload.domain)
-        .order_by(ConsentRecord.id.desc())
-    ).first()
 
-    # Create the new immutable consent record
-    record = ConsentRecord(
-        user_identifier=payload.user_identifier,
-        domain=payload.domain,
-        previous_record_id=previous.id if previous else None,
+    write_consent_record.delay(
+        payload.user_identifier,
+        payload.domain,
+        [d.model_dump() for d in payload.decisions],
     )
-    session.add(record)
-    session.flush()  # sends INSERT to DB so record.id is assigned — but not committed yet
-
-    # Create one decision row per category in the payload
-    decisions_out = []
-    for d in payload.decisions:
-        category = session.exec(
-            select(ConsentCategory).where(ConsentCategory.name == d.category_name)
-        ).first()
-        if not category:
-            raise HTTPException(status_code=400, detail=f"Unknown category: '{d.category_name}'")
-
-        session.add(ConsentDecision(
-            consent_record_id=record.id,
-            category_id=category.id,
-            accepted=d.accepted,
-        ))
-        decisions_out.append(DecisionOut(category_name=d.category_name, accepted=d.accepted))
-
-    session.commit()
-    session.refresh(record)
-
-    # New record means cached latest is stale — delete it so next read rebuilds
-    redis_client.delete(cache_key(payload.user_identifier, payload.domain))
-
-    return ConsentOut(
-        id=record.id,
-        user_identifier=record.user_identifier,
-        domain=record.domain,
-        created_at=record.created_at,
-        previous_record_id=record.previous_record_id,
-        decisions=decisions_out,
-    )
+    return ConsentQueued(user_identifier=payload.user_identifier, domain=payload.domain)
 
 
 @router.get("/history", response_model=list[ConsentOut])

@@ -42,6 +42,8 @@ export default function ConsentBanner({ userId, domain, onSubmitted }: Props) {
         accepted: decisions[c.name] ?? false,
       }));
       await submitConsent(userId, domain, payload);
+      // Brief pause — the write is async (Celery worker), give it time to commit
+      await new Promise((resolve) => setTimeout(resolve, 500));
       onSubmitted();
     } catch {
       setError("Failed to save consent. Please try again.");
