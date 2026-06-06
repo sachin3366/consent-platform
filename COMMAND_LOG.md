@@ -814,3 +814,82 @@ The banner always resets toggles to all-off on every load. It does not pre-popul
 Step 11 — Pre-populate the consent banner from `GET /consent/latest` so returning users see their last saved preferences instead of all-off defaults.
 
 ---
+
+## Step 11 — Pre-populate Banner from Last Saved Preferences
+**Date:** 2026-06-06
+
+### What & Why
+The banner previously defaulted all toggles to off on every load — even for users who had already saved their preferences. A returning user would have to re-set their choices every time they opened the banner, which is confusing and doesn't reflect real-world consent platforms.
+
+The fix: when the banner mounts, call `GET /consent/latest` alongside `GET /consent/categories`. If a prior consent record exists, overlay its decisions onto the defaults so the toggles reflect the user's last saved state. First-time users are unaffected — a 404 from `/consent/latest` means no prior record, so everything stays off.
+
+### What Changed
+
+| File | Change |
+|---|---|
+| `frontend/src/api.ts` | Added `fetchLatest()` — calls `GET /consent/latest`, returns `ConsentRecord \| null` |
+| `frontend/src/ConsentBanner.tsx` | Updated `useEffect` to fetch categories and latest consent in parallel, then overlay saved decisions onto toggle defaults |
+
+### The Key Change in ConsentBanner.tsx
+
+**Before:**
+```typescript
+useEffect(() => {
+  fetchCategories()
+    .then((cats) => {
+      setCategories(cats);
+      const defaults: Record<string, boolean> = {};
+      cats.forEach((c) => (defaults[c.name] = false));  // always all-off
+      setDecisions(defaults);
+    })
+    ...
+}, []);  // runs once on mount, never again
+```
+
+**After:**
+```typescript
+useEffect(() => {
+  Promise.all([fetchCategories(), fetchLatest(userId, domain)])
+    .then(([cats, latest]) => {
+      setCategories(cats);
+      const defaults: Record<string, boolean> = {};
+      cats.forEach((c) => (defaults[c.name] = false));  // start with all-off
+      if (latest) {
+        latest.decisions.forEach((d) => (defaults[d.category_name] = d.accepted));
+        // overlay: each saved decision overwrites the false default
+      }
+      setDecisions(defaults);
+    })
+    ...
+}, [userId, domain]);  // re-runs if user or domain ever changes
+```
+
+### Why `Promise.all` instead of sequential fetches
+
+Both requests are independent — fetching categories doesn't depend on knowing the latest record, and vice versa. With `Promise.all`, both fire at the same time and we wait for both to finish. This is faster than running them one after the other (which would add unnecessary latency on every banner load).
+
+```
+Sequential (before):  ──fetchCategories──► ──fetchLatest──►  done
+Parallel   (after):   ──fetchCategories──►
+                       ──fetchLatest──────►  done  (faster)
+```
+
+### Why `null` instead of throwing on 404
+
+`fetchLatest` returns `ConsentRecord | null` — it returns `null` on a 404 rather than throwing an error. This is intentional: a 404 means "this user has no prior consent record" which is a **normal, expected state** (not an error). The caller checks `if (latest)` and proceeds either way. Throwing would force the caller to wrap in try/catch for something that isn't exceptional.
+
+### Verified
+
+Playwright confirmed: on load, the banner showed `strictly_necessary` toggled ON — matching the last record saved for `user-demo-001 / demo.local` in Step 10. No console errors.
+
+### Key Concepts
+- **`Promise.all`** — takes an array of promises and returns a new promise that resolves when ALL of them resolve; the result is an array of their values in the same order. If any one rejects, the whole thing rejects.
+- **Parallel vs sequential fetching** — independent requests should fire in parallel; sequential fetching (one then the other) is a common beginner mistake that adds unnecessary latency
+- **`null` vs exception for expected absence** — use `null` (or an empty array) when "not found" is a normal state; throw an exception when something genuinely went wrong. A first-time user having no consent record is normal, not an error.
+- **Overlay pattern** — start from a safe default (all-false), then overwrite only the fields you have data for. This handles the case where new categories were added since the user last saved — those new categories default to off rather than crashing.
+- **`useEffect` dependency array** — listing `[userId, domain]` instead of `[]` means "re-run this effect whenever userId or domain changes." With `[]` the effect only runs once on mount, which would show stale data if the user identity ever changed.
+
+### What Comes Next
+Step 12 — to be decided.
+
+---
