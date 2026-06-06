@@ -79,7 +79,37 @@ This keeps the write path thin, matching the real-world requirement that a conse
 - **Cache miss** → query PostgreSQL, store in Redis with a 5-minute TTL, return result
 - **On new submission** → Celery worker deletes the cache key so the next read rebuilds from the fresh row
 
-### 4. Per-domain API key authorization
+### 4. Frontend: centralized API layer
+
+All `fetch()` calls live in a single file — `api.ts` — never scattered across components. Components import named functions (`fetchCategories`, `submitConsent`, etc.) and never construct URLs or set headers themselves. This means:
+
+- The `X-API-Key` header is set in one place; changing auth doesn't touch component code
+- TypeScript interfaces in `api.ts` mirror the backend schemas, so mismatches (e.g. using `record.userId` instead of `record.user_identifier`) are caught at compile time, not at runtime
+- Every fetch is testable and mockable in isolation
+
+### 5. Frontend: state lifting and the refreshKey pattern
+
+`App.tsx` owns a `refreshKey` counter. After a successful banner submission it increments the counter and passes it to `ConsentHistory` as a prop. `ConsentHistory` lists `refreshKey` in its `useEffect` dependency array, so it automatically re-fetches whenever the counter changes — without imperative calls between siblings.
+
+```
+App (owns refreshKey)
+ ├── ConsentBanner  → calls onSubmitted() after submit
+ │                    → App increments refreshKey
+ └── ConsentHistory → useEffect([..., refreshKey]) re-fetches
+```
+
+### 6. Frontend: parallel data fetching
+
+`ConsentBanner` needs two things on mount: the list of categories and the user's last saved preferences. These are independent requests, so they fire in parallel with `Promise.all`:
+
+```typescript
+Promise.all([fetchCategories(), fetchLatest(userId, domain)])
+  .then(([cats, latest]) => { ... })
+```
+
+Sequential fetching (one then the other) would add unnecessary latency on every banner load.
+
+### 7. Per-domain API key authorization
 
 Every client (website) registers and receives an API key scoped to their domain. Every protected request must include the key in the `X-API-Key` header. The server checks two things:
 
