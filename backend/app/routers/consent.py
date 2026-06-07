@@ -6,8 +6,12 @@ from sqlmodel import Session, select
 from app.auth import get_api_client
 from app.cache import CACHE_TTL, cache_key, redis_client
 from app.database import get_session
+from app.jurisdictions import CategoryRule, RULES, SUPPORTED
 from app.models import APIClient, ConsentCategory, ConsentDecision, ConsentRecord
-from app.schemas import CategoryOut, ConsentIn, ConsentOut, ConsentQueued, DecisionOut
+from app.schemas import (
+    CategoryOut, ConsentIn, ConsentOut, ConsentQueued, DecisionOut,
+    JurisdictionCategoryRule, JurisdictionRules,
+)
 from app.tasks import write_consent_record
 
 router = APIRouter(prefix="/consent", tags=["consent"])
@@ -16,6 +20,40 @@ router = APIRouter(prefix="/consent", tags=["consent"])
 @router.get("/categories", response_model=list[CategoryOut])
 def list_categories(session: Session = Depends(get_session)):
     return session.exec(select(ConsentCategory)).all()
+
+
+@router.get("/rules/{jurisdiction}", response_model=JurisdictionRules)
+def get_jurisdiction_rules(jurisdiction: str, session: Session = Depends(get_session)):
+    jurisdiction = jurisdiction.upper()
+    if jurisdiction not in SUPPORTED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown jurisdiction '{jurisdiction}'. Supported: {SUPPORTED}",
+        )
+    config = RULES[jurisdiction]
+    categories = session.exec(select(ConsentCategory)).all()
+
+    return JurisdictionRules(
+        jurisdiction=jurisdiction,
+        banner_title=config.banner_title,
+        banner_subtitle=config.banner_subtitle,
+        requires_opt_in=config.requires_opt_in,
+        button_label=config.button_label,
+        categories=[
+            JurisdictionCategoryRule(
+                name=cat.name,
+                description=cat.description,
+                default_accepted=config.category_rules.get(
+                    cat.name, CategoryRule(default_accepted=False, locked=False)
+                ).default_accepted,
+                locked=config.category_rules.get(
+                    cat.name, CategoryRule(default_accepted=False, locked=False)
+                ).locked,
+                label=config.category_rules.get(cat.name, CategoryRule(False, False)).label,
+            )
+            for cat in categories
+        ],
+    )
 
 
 @router.post("", response_model=ConsentQueued, status_code=202)
@@ -30,6 +68,7 @@ def record_consent(
         payload.user_identifier,
         payload.domain,
         [d.model_dump() for d in payload.decisions],
+        payload.jurisdiction,
     )
     return ConsentQueued(user_identifier=payload.user_identifier, domain=payload.domain)
 

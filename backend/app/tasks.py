@@ -7,7 +7,7 @@ from app.models import ConsentCategory, ConsentDecision, ConsentRecord
 
 
 @celery_app.task
-def write_consent_record(user_identifier: str, domain: str, decisions: list[dict]):
+def write_consent_record(user_identifier: str, domain: str, decisions: list[dict], jurisdiction: str = "GDPR"):
     with Session(engine) as session:
         previous = session.exec(
             select(ConsentRecord)
@@ -19,6 +19,7 @@ def write_consent_record(user_identifier: str, domain: str, decisions: list[dict
         record = ConsentRecord(
             user_identifier=user_identifier,
             domain=domain,
+            jurisdiction=jurisdiction,
             previous_record_id=previous.id if previous else None,
         )
         session.add(record)

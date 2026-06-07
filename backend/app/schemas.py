@@ -11,6 +11,7 @@ class DecisionIn(BaseModel):
 class ConsentIn(BaseModel):
     user_identifier: str  # cookie/session ID from the browser
     domain: str           # e.g. "shop.com"
+    jurisdiction: str = "GDPR"
     decisions: list[DecisionIn]
 
 
@@ -38,3 +39,20 @@ class ConsentQueued(BaseModel):
     status: str = "queued"
     user_identifier: str
     domain: str
+
+
+class JurisdictionCategoryRule(BaseModel):
+    name: str
+    description: str
+    default_accepted: bool
+    locked: bool
+    label: Optional[str] = None
+
+
+class JurisdictionRules(BaseModel):
+    jurisdiction: str
+    banner_title: str
+    banner_subtitle: str
+    requires_opt_in: bool
+    button_label: str
+    categories: list[JurisdictionCategoryRule]

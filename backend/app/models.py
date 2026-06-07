@@ -16,6 +16,7 @@ class ConsentRecord(SQLModel, table=True):
     user_identifier: str = Field(index=True)   # cookie/session ID from the browser
     domain: str = Field(index=True)             # which website this consent belongs to
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    jurisdiction: str = Field(default="GDPR")  # which ruleset applied at collection time
     previous_record_id: Optional[int] = Field(
         default=None, foreign_key="consentrecord.id"
     )

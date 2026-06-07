@@ -1375,6 +1375,166 @@ The 500ms is a demo shortcut, not a production solution.
 - **`.delay()`** — Celery's shorthand for `.apply_async()`; sends the task to the broker queue immediately and returns a task ID (which we ignore here)
 
 ### What Comes Next
-Step 16 — to be decided.
+Step 16 — Jurisdictional rules engine (GDPR vs CCPA).
+
+---
+
+## Step 16 — Jurisdictional Rules Engine (GDPR / CCPA)
+**Date:** 2026-06-06
+
+### What & Why
+A consent platform must behave differently depending on which privacy law applies. GDPR (EU) requires explicit opt-in — no category is enabled until the user actively agrees. CCPA (California) uses opt-out — everything is on by default, and the user must take action to opt out.
+
+Hard-coding these differences into the banner would mean touching UI code every time a new jurisdiction is added. Instead, we built a **config-driven rules engine**: all per-jurisdiction behaviour (defaults, titles, button labels, category labels) lives in one Python file (`jurisdictions.py`). The API exposes it as a single endpoint; the frontend consumes it and renders accordingly.
+
+### Design Decision: Config File, Not a DB Table
+We deliberately chose a Python `NamedTuple` dict over a database table. Compliance rules change infrequently and are code-level concerns — changing a rule should go through a code review and git diff, not a database migration. This makes the audit trail automatic: `git log backend/app/jurisdictions.py` shows every rules change ever made and who approved it.
+
+### Files Changed / Created
+
+| File | Change |
+|---|---|
+| `backend/app/jurisdictions.py` | Created — `JurisdictionConfig` and `CategoryRule` NamedTuples, `RULES` dict for GDPR + CCPA |
+| `backend/app/models.py` | Added `jurisdiction: str = Field(default="GDPR")` to `ConsentRecord` |
+| `backend/app/schemas.py` | Added `JurisdictionCategoryRule`, `JurisdictionRules` response schemas; added `jurisdiction` field to `ConsentIn`; added `ConsentQueued` (moved from inline) |
+| `backend/app/routers/consent.py` | Added `GET /consent/rules/{jurisdiction}` endpoint |
+| `backend/app/tasks.py` | Passes `jurisdiction` through to the `ConsentRecord` write |
+| `frontend/src/api.ts` | Added `JurisdictionCategoryRule`, `JurisdictionRules` interfaces; added `fetchRules()` |
+| `frontend/src/ConsentBanner.tsx` | Rewritten — fetches rules + latest in parallel, starts from jurisdiction defaults, overlays saved prefs, handles locked categories, CCPA opt-out notice, dynamic button label |
+| `frontend/src/App.tsx` | Added jurisdiction dropdown selector, passes `jurisdiction` prop to banner |
+
+### The Rules Engine (jurisdictions.py)
+
+```python
+class CategoryRule(NamedTuple):
+    default_accepted: bool
+    locked: bool
+    label: str | None = None   # None → display category name; set → display this label
+
+class JurisdictionConfig(NamedTuple):
+    banner_title: str
+    banner_subtitle: str
+    requires_opt_in: bool      # True = GDPR style; False = CCPA style
+    button_label: str
+    category_rules: dict[str, CategoryRule]
+
+RULES = {
+    "GDPR": JurisdictionConfig(
+        requires_opt_in=True,
+        button_label="Save preferences",
+        ...category_rules={
+            "strictly_necessary": CategoryRule(default_accepted=True,  locked=True),
+            "functional":         CategoryRule(default_accepted=False, locked=False),
+            "analytics":          CategoryRule(default_accepted=False, locked=False),
+            "marketing":          CategoryRule(default_accepted=False, locked=False),
+        },
+    ),
+    "CCPA": JurisdictionConfig(
+        requires_opt_in=False,
+        button_label="Confirm choices",
+        ...category_rules={
+            "strictly_necessary": CategoryRule(default_accepted=True, locked=True),
+            "functional":         CategoryRule(default_accepted=True, locked=False),
+            "analytics":          CategoryRule(default_accepted=True, locked=False),
+            "marketing":          CategoryRule(default_accepted=True, locked=False,
+                                               label="Do Not Sell My Personal Information"),
+        },
+    ),
+}
+```
+
+### New API Endpoint: GET /consent/rules/{jurisdiction}
+
+This is a **public** endpoint (no API key required) — a website needs to fetch the rules before it can even render the banner, and it has no user data yet at that point.
+
+```
+GET /consent/rules/GDPR →
+{
+  "jurisdiction": "GDPR",
+  "banner_title": "Cookie Preferences",
+  "requires_opt_in": true,
+  "button_label": "Save preferences",
+  "categories": [
+    { "name": "strictly_necessary", "default_accepted": true, "locked": true, "label": null },
+    { "name": "functional",         "default_accepted": false, "locked": false },
+    { "name": "analytics",          "default_accepted": false, "locked": false },
+    { "name": "marketing",          "default_accepted": false, "locked": false }
+  ]
+}
+
+GET /consent/rules/CCPA →
+{
+  "requires_opt_in": false,
+  "button_label": "Confirm choices",
+  "categories": [
+    { "name": "strictly_necessary", "default_accepted": true,  "locked": true  },
+    { "name": "functional",         "default_accepted": true,  "locked": false },
+    { "name": "analytics",          "default_accepted": true,  "locked": false },
+    { "name": "marketing",          "default_accepted": true,  "locked": false,
+      "label": "Do Not Sell My Personal Information" }
+  ]
+}
+```
+
+The response merges data from two sources: category names and descriptions come from the PostgreSQL `ConsentCategory` table (stable reference data); defaults, locked status, titles, and labels come from `RULES` in `jurisdictions.py` (compliance config). Neither source alone has the full picture.
+
+### Frontend: How the Banner Adapts
+
+```typescript
+// ConsentBanner.tsx — simplified
+useEffect(() => {
+  Promise.all([fetchRules(jurisdiction), fetchLatest(userId, domain)])
+    .then(([rules, latest]) => {
+      // 1. Start from jurisdiction defaults (GDPR: all off; CCPA: all on)
+      const defaults = Object.fromEntries(
+        rules.categories.map(c => [c.name, c.default_accepted])
+      );
+      // 2. Overlay with saved preferences if they exist
+      if (latest) {
+        latest.decisions.forEach(d => (defaults[d.category_name] = d.accepted));
+      }
+      setDecisions(defaults);
+    });
+}, [userId, domain, jurisdiction]);  // re-runs when jurisdiction changes
+```
+
+Switching jurisdictions in the dropdown re-runs this effect: the banner title, subtitle, toggles, and button label all change to match the selected law. The "CCPA opt-out notice" bar (yellow background, warning text) renders only when `!rules.requires_opt_in`.
+
+Locked categories (`strictly_necessary`) have their toggles disabled and an "Always on" badge — the user cannot turn them off regardless of jurisdiction.
+
+### Commands Executed
+
+```bash
+# Add jurisdiction column to existing PostgreSQL table (SQLModel create_all doesn't ALTER)
+psql consent_platform -c "ALTER TABLE consentrecord ADD COLUMN IF NOT EXISTS jurisdiction VARCHAR NOT NULL DEFAULT 'GDPR';"
+
+# Verify the backend rules endpoint returns correct data
+curl -s http://localhost:8000/consent/rules/GDPR | python3 -m json.tool
+curl -s http://localhost:8000/consent/rules/CCPA | python3 -m json.tool
+
+# Type-check the frontend with no errors
+cd frontend && npx tsc --noEmit
+```
+
+### Verification Results
+
+**GDPR endpoint:** `requires_opt_in=true`, all categories `default_accepted=false` except `strictly_necessary=true+locked`, `button_label="Save preferences"` ✓
+
+**CCPA endpoint:** `requires_opt_in=false`, all categories `default_accepted=true`, marketing `label="Do Not Sell My Personal Information"`, `button_label="Confirm choices"` ✓
+
+**TypeScript:** `npx tsc --noEmit` produced no output (clean) ✓
+
+### Key Concepts
+- **Config-driven architecture** — behaviour is controlled by data (NamedTuples in a file) rather than branching logic scattered through the code; adding a new jurisdiction means adding one entry to `RULES`, nothing else
+- **NamedTuple** — an immutable Python data structure; ideal for configuration because it can't be accidentally mutated at runtime; fields are named (readable) but the object is lightweight (no dict overhead)
+- **Public vs protected endpoints** — `GET /consent/rules/{jurisdiction}` is public; the site needs rules before it can authenticate the user. `POST /consent`, `GET /consent/latest`, and `GET /consent/history` are protected because they read/write user data.
+- **`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`** — the safe way to add a column to a live PostgreSQL table that already has data; `IF NOT EXISTS` makes it idempotent (safe to run multiple times); SQLModel's `create_all` only creates tables, never alters them
+- **Overlay pattern** (revisited from Step 11) — start from jurisdiction defaults, then overlay saved user preferences; this handles both first-time users (no saved prefs) and returning users gracefully
+- **GDPR opt-in vs CCPA opt-out** — the core legal distinction: GDPR requires a user to actively consent before data processing begins; CCPA requires processors to stop on demand, so everything is on by default until the user opts out
+
+### What Comes Next
+- Tier 1: add `policy_version` and `source` fields to `ConsentRecord` for full P0 compliance
+- Tier 1: add a `GET /consent/export/{user_identifier}` endpoint (right to data portability)
+- Tier 2: webhook notifications on consent change events
 
 ---
